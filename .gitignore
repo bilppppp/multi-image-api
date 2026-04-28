@@ -1,0 +1,5 @@
+.DS_Store
+node_modules/
+scripts/node_modules/
+tuzi-output/
+*.log

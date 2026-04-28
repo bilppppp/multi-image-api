@@ -1,0 +1,14 @@
+{
+  "name": "multi-image-api-skill-scripts",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test": "bun test",
+    "check": "bun test && bun run main.ts --help >/dev/null"
+  },
+  "dependencies": {
+    "sharp": "^0.33.5"
+  },
+  "devDependencies": {}
+}
