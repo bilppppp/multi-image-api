@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 
 const DEFAULT_BASE_URL = "https://api.tu-zi.com/v1";
+const DEFAULT_ALAPI_BASE_URL = "https://v3.alapi.cn/api/ai/images";
 const DEFAULT_MODEL = "gpt-image-2";
 const DEFAULT_OUTPUT_DIR = "tuzi-output";
 const REQUEST_TIMEOUT_MS = 1_800_000;
@@ -17,8 +18,10 @@ const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const SCRIPT_DIR = path.dirname(SCRIPT_PATH);
 
 type Mode = "generation" | "edit";
+type Provider = "tuzi" | "alapi";
 
 export type CliArgs = {
+  provider: Provider;
   prompt: string | null;
   output: string | null;
   referenceImages: string[];
@@ -28,12 +31,14 @@ export type CliArgs = {
   quality: string | null;
   n: number;
   model: string;
+  resolution: string;
   json: boolean;
   help: boolean;
   background: boolean;
 };
 
 export type RunResult = {
+  provider: Provider;
   mode: Mode;
   model: string;
   size: string;
@@ -104,11 +109,13 @@ export type PreparedEditAssets = {
 
 function printUsage(): void {
   console.log(`Usage:
-  bun scripts/main.ts --prompt "A 16:9 moon poster" --output out.png --background
+  bun scripts/main.ts --provider tuzi --prompt "A 16:9 moon poster" --output out.png --background
+  bun scripts/main.ts --provider alapi --prompt "A cat" --output cat.png --background
   bun scripts/main.ts jobs wait --id JOB_ID --timeout 90
   bun scripts/main.ts --prompt "Make the coat blue" --ref source.jpg --output edited.png --background
 
 Options:
+  --provider <name>      Provider: tuzi or alapi. Default: tuzi.
   --prompt <text>        Prompt text. Positional text is also accepted.
   --output <path>, -o    Output image path. Default: tuzi-output/tuzi-YYYYMMDD-HHMMSS.png
   --ref <files...>       Reference images. First image is the main edit image.
@@ -118,12 +125,14 @@ Options:
   --quality <value>      Tuzi quality value. Image edits default to low.
   --n <count>            Number of images. Default: 1.
   --model <id>           Model. Default: gpt-image-2.
+  --resolution <value>   ALAPI resolution: 1k, 2k, or 4k. Default: 1k.
   --background           Start a local background job and return immediately.
   --json                 Print machine-readable result.
   --help, -h             Show this help.
 
 Environment:
-  TUZI_API_KEY           Required API key.`);
+  TUZI_API_KEY           Required when --provider tuzi.
+  ALAPI_TOKEN            Required when --provider alapi.`);
 }
 
 async function getSharp(): Promise<SharpFactory> {
@@ -138,6 +147,7 @@ async function getSharp(): Promise<SharpFactory> {
 
 export function parseArgs(argv: string[]): CliArgs {
   const out: CliArgs = {
+    provider: "tuzi",
     prompt: null,
     output: null,
     referenceImages: [],
@@ -147,6 +157,7 @@ export function parseArgs(argv: string[]): CliArgs {
     quality: null,
     n: 1,
     model: DEFAULT_MODEL,
+    resolution: "1k",
     json: false,
     help: false,
     background: false,
@@ -175,6 +186,12 @@ export function parseArgs(argv: string[]): CliArgs {
     }
     if (arg === "--background") {
       out.background = true;
+      continue;
+    }
+    if (arg === "--provider") {
+      const value = argv[++i];
+      if (!value) throw new Error("Missing value for --provider");
+      out.provider = normalizeProvider(value);
       continue;
     }
     if (arg === "--prompt") {
@@ -236,6 +253,12 @@ export function parseArgs(argv: string[]): CliArgs {
       out.model = value;
       continue;
     }
+    if (arg === "--resolution") {
+      const value = argv[++i];
+      if (!value) throw new Error("Missing value for --resolution");
+      out.resolution = value;
+      continue;
+    }
     if (arg.startsWith("-")) {
       throw new Error(`Unknown option: ${arg}`);
     }
@@ -247,6 +270,13 @@ export function parseArgs(argv: string[]): CliArgs {
   }
 
   return out;
+}
+
+function normalizeProvider(value: string): Provider {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "tuzi" || normalized === "tu-zi") return "tuzi";
+  if (normalized === "alapi") return "alapi";
+  throw new Error(`Unsupported provider: ${value}. Use tuzi or alapi.`);
 }
 
 export function buildOutputPaths(output: string | null, count: number, now = new Date()): string[] {
@@ -463,9 +493,7 @@ export async function readJobStatus(id: string, jobsDir = defaultJobsDir()): Pro
 
 export async function startBackgroundJob(args: CliArgs, deps: JobDeps = {}): Promise<JobStatus> {
   const env = deps.env || process.env;
-  if (!env.TUZI_API_KEY) {
-    throw new Error("TUZI_API_KEY is required. Set it in your environment before using this skill.");
-  }
+  getProviderApiKey(args.provider, env);
   if (!args.prompt || args.prompt.trim().length === 0) {
     throw new Error("Prompt is required. Pass --prompt or positional prompt text.");
   }
@@ -574,23 +602,23 @@ export async function waitForJob(
 export async function runGeneration(args: CliArgs, deps: RunDeps = {}): Promise<RunResult> {
   if (args.help) {
     printUsage();
-    return { mode: "generation", model: normalizeModel(args.model), size: "1024x1024", outputs: [] };
+    return { provider: args.provider, mode: "generation", model: normalizeModel(args.model), size: "1024x1024", outputs: [] };
   }
 
   const env = deps.env || process.env;
-  const apiKey = env.TUZI_API_KEY;
-  if (!apiKey) {
-    throw new Error("TUZI_API_KEY is required. Set it in your environment before using this skill.");
-  }
+  const apiKey = getProviderApiKey(args.provider, env);
   if (!args.prompt || args.prompt.trim().length === 0) {
     throw new Error("Prompt is required. Pass --prompt or positional prompt text.");
   }
   await getSharp();
 
   const fetcher = deps.fetch || globalThis.fetch;
-  const baseURL = (env.TUZI_BASE_URL || DEFAULT_BASE_URL).replace(/\/+$/, "");
+  const baseURL = getProviderBaseUrl(args.provider, env);
   const model = normalizeModel(args.model);
   const mode: Mode = args.referenceImages.length > 0 ? "edit" : "generation";
+  if (args.provider === "alapi" && args.n > 4) {
+    throw new Error("ALAPI supports --n from 1 to 4.");
+  }
 
   let inputWidth: number | undefined;
   let inputHeight: number | undefined;
@@ -614,14 +642,34 @@ export async function runGeneration(args: CliArgs, deps: RunDeps = {}): Promise<
   });
 
   const images =
-    mode === "edit"
-      ? await requestEditImages(baseURL, apiKey, args, model, size, fetcher)
-      : await requestGeneratedImages(baseURL, apiKey, args, model, size, fetcher);
+    args.provider === "alapi"
+      ? await requestAlapiImages(baseURL, apiKey, args, model, size, fetcher)
+      : mode === "edit"
+        ? await requestEditImages(baseURL, apiKey, args, model, size, fetcher)
+        : await requestGeneratedImages(baseURL, apiKey, args, model, size, fetcher);
 
   const runCwd = deps.cwd || resolveRunCwd({ oldpwd: env.OLDPWD });
   const outputs = makeAbsoluteOutputs(buildOutputPaths(args.output, images.length, deps.now), runCwd);
   await saveImages(images, outputs);
-  return { mode, model, size, outputs };
+  return { provider: args.provider, mode, model, size, outputs };
+}
+
+function getProviderApiKey(provider: Provider, env: Record<string, string | undefined>): string {
+  if (provider === "alapi") {
+    if (!env.ALAPI_TOKEN) {
+      throw new Error("ALAPI_TOKEN is required. Set it in your environment before using ALAPI.");
+    }
+    return env.ALAPI_TOKEN;
+  }
+  if (!env.TUZI_API_KEY) {
+    throw new Error("TUZI_API_KEY is required. Set it in your environment before using Tuzi.");
+  }
+  return env.TUZI_API_KEY;
+}
+
+function getProviderBaseUrl(provider: Provider, env: Record<string, string | undefined>): string {
+  const baseURL = provider === "alapi" ? env.ALAPI_BASE_URL || DEFAULT_ALAPI_BASE_URL : env.TUZI_BASE_URL || DEFAULT_BASE_URL;
+  return baseURL.replace(/\/+$/, "");
 }
 
 function normalizeModel(model: string): string {
@@ -692,6 +740,92 @@ async function requestEditImages(
   return extractImagesFromResponse((await response.json()) as ApiImageResponse, fetcher);
 }
 
+async function requestAlapiImages(
+  baseURL: string,
+  apiKey: string,
+  args: CliArgs,
+  model: string,
+  size: string,
+  fetcher: typeof globalThis.fetch
+): Promise<Uint8Array[]> {
+  const url = new URL(`${baseURL}/generations`);
+  url.searchParams.set("token", apiKey);
+
+  const body: Record<string, unknown> = {
+    model,
+    prompt: args.prompt,
+    n: String(args.n),
+    size,
+    resolution: args.resolution || "1k",
+  };
+  if (args.referenceImages.length > 0) {
+    body.image_urls = await Promise.all(args.referenceImages.map((imagePath) => fileToAlapiImageUrl(imagePath)));
+  }
+
+  const response = await fetchWithTimeout(fetcher, url.toString(), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  await assertOk(response, "ALAPI image generation failed");
+  const payload = (await response.json()) as unknown;
+  assertProviderBusinessOk(payload, "ALAPI image generation failed");
+
+  const directItems = getImageItems(payload);
+  if (directItems.length > 0) {
+    return extractImagesFromResponse({ data: directItems }, fetcher, "ALAPI");
+  }
+
+  const taskId = extractTaskId(payload);
+  if (taskId) {
+    return pollAlapiTask(baseURL, apiKey, taskId, fetcher);
+  }
+
+  throw new Error("ALAPI response did not include image data or task_id.");
+}
+
+async function fileToAlapiImageUrl(filePath: string): Promise<string> {
+  const bytes = await readFile(filePath);
+  return `data:${getMimeType(filePath)};base64,${Buffer.from(bytes).toString("base64")}`;
+}
+
+async function pollAlapiTask(
+  baseURL: string,
+  apiKey: string,
+  taskId: string,
+  fetcher: typeof globalThis.fetch
+): Promise<Uint8Array[]> {
+  const deadline = Date.now() + REQUEST_TIMEOUT_MS;
+  let lastStatus = "submitted";
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 5_000));
+    const url = new URL(`${baseURL}/generations/task`);
+    url.searchParams.set("token", apiKey);
+    const response = await fetchWithTimeout(fetcher, url.toString(), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ task_id: taskId }),
+    });
+    await assertOk(response, "ALAPI task query failed");
+    const payload = (await response.json()) as unknown;
+    assertProviderBusinessOk(payload, "ALAPI task query failed");
+    lastStatus = extractStatus(payload) || lastStatus;
+
+    const items = getImageItems(payload);
+    if (items.length > 0) {
+      return extractImagesFromResponse({ data: items }, fetcher, "ALAPI");
+    }
+    if (/fail|error|cancel/i.test(lastStatus)) {
+      throw new Error(`ALAPI task failed: ${lastStatus}`);
+    }
+  }
+  throw new Error(`ALAPI task timed out before images were ready. Last status: ${lastStatus}`);
+}
+
 async function fetchWithTimeout(
   fetcher: typeof globalThis.fetch,
   url: string,
@@ -714,23 +848,40 @@ async function assertOk(response: Response, message: string): Promise<void> {
   throw new Error(`${message}: HTTP ${response.status}${detail ? ` ${detail}` : ""}`);
 }
 
+function assertProviderBusinessOk(payload: unknown, message: string): void {
+  if (!isRecord(payload)) return;
+  if (payload.success === false) {
+    const code = typeof payload.code === "number" || typeof payload.code === "string" ? ` code ${payload.code}` : "";
+    const detail = typeof payload.message === "string" ? ` ${payload.message}` : "";
+    throw new Error(redactSensitiveText(`${message}:${code}${detail}`));
+  }
+  const data = payload.data;
+  if (isRecord(data) && data.success === false) {
+    const code = typeof data.code === "number" || typeof data.code === "string" ? ` code ${data.code}` : "";
+    const detail = typeof data.message === "string" ? ` ${data.message}` : "";
+    throw new Error(redactSensitiveText(`${message}:${code}${detail}`));
+  }
+}
+
 export function redactSensitiveText(input: string): string {
   return input
     .replace(
-      /(^|[^A-Za-z0-9_])(["']?(?:TUZI_API_KEY|OPENAI_API_KEY|api[_-]?key|apikey|secret|token|key)["']?\s*[:=]\s*)(["']?)([^"',\s}]+)/gi,
+      /(^|[^A-Za-z0-9_])(["']?(?:TUZI_API_KEY|ALAPI_TOKEN|OPENAI_API_KEY|api[_-]?key|apikey|secret|token|key)["']?\s*[:=]\s*)(["']?)([^"',\s}&]+)/gi,
       (_match, prefix: string, label: string, quote: string) => `${prefix}${label}${quote}[redacted]`
     )
     .replace(/Bearer\s+[^\s"',}]+/gi, "Bearer [redacted]")
-    .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, "[redacted]");
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, "[redacted]")
+    .replace(/\bghp_[A-Za-z0-9_]{8,}\b/g, "[redacted]");
 }
 
 export async function extractImagesFromResponse(
-  result: ApiImageResponse,
+  result: ApiImageResponse | unknown,
   fetcher: typeof globalThis.fetch,
+  providerLabel = "image",
   timeoutMs = REQUEST_TIMEOUT_MS
 ): Promise<Uint8Array[]> {
-  const data = result.data || [];
-  if (data.length === 0) throw new Error("Tuzi response did not include image data.");
+  const data = getImageItems(result);
+  if (data.length === 0) throw new Error(`${providerLabel} response did not include image data.`);
 
   const images: Uint8Array[] = [];
   for (const item of data) {
@@ -740,13 +891,70 @@ export async function extractImagesFromResponse(
     }
     if (item.url) {
       const response = await fetchWithTimeout(fetcher, item.url, {}, timeoutMs);
-      await assertOk(response, "Failed to download Tuzi image result");
+      await assertOk(response, `Failed to download ${providerLabel} image result`);
       images.push(new Uint8Array(await response.arrayBuffer()));
       continue;
     }
-    throw new Error("Tuzi image item did not include url or b64_json.");
+    throw new Error(`${providerLabel} image item did not include url or b64_json.`);
   }
   return images;
+}
+
+function getImageItems(result: unknown): Array<{ url?: string; b64_json?: string }> {
+  const items: Array<{ url?: string; b64_json?: string }> = [];
+  const visitArray = (value: unknown): void => {
+    if (!Array.isArray(value)) return;
+    for (const item of value) {
+      if (!isRecord(item)) continue;
+      const url = typeof item.url === "string" ? item.url : typeof item.image_url === "string" ? item.image_url : undefined;
+      const b64_json =
+        typeof item.b64_json === "string"
+          ? item.b64_json
+          : typeof item.base64 === "string"
+            ? item.base64
+            : typeof item.image_base64 === "string"
+              ? item.image_base64
+              : undefined;
+      if (url || b64_json) items.push({ url, b64_json });
+    }
+  };
+
+  if (!isRecord(result)) return items;
+  visitArray(result.data);
+  if (isRecord(result.data)) {
+    visitArray(result.data.data);
+    visitArray(result.data.images);
+    if (isRecord(result.data.result)) visitArray(result.data.result.images);
+  }
+  visitArray(result.images);
+  if (isRecord(result.result)) visitArray(result.result.images);
+  return items;
+}
+
+function extractTaskId(payload: unknown): string | null {
+  if (!isRecord(payload)) return null;
+  if (typeof payload.task_id === "string") return payload.task_id;
+  if (typeof payload.taskId === "string") return payload.taskId;
+  if (isRecord(payload.data)) {
+    if (typeof payload.data.task_id === "string") return payload.data.task_id;
+    if (typeof payload.data.taskId === "string") return payload.data.taskId;
+  }
+  return null;
+}
+
+function extractStatus(payload: unknown): string | null {
+  if (!isRecord(payload)) return null;
+  if (typeof payload.status === "string") return payload.status;
+  if (isRecord(payload.data) && typeof payload.data.status === "string") return payload.data.status;
+  if (isRecord(payload.result) && typeof payload.result.status === "string") return payload.result.status;
+  if (isRecord(payload.data) && isRecord(payload.data.result) && typeof payload.data.result.status === "string") {
+    return payload.data.result.status;
+  }
+  return null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 async function saveImages(images: Uint8Array[], outputs: string[]): Promise<void> {

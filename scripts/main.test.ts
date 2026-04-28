@@ -39,6 +39,14 @@ describe("CLI parsing and output paths", () => {
     ).rejects.toThrow("TUZI_API_KEY");
   });
 
+  test("parses ALAPI provider and requires ALAPI_TOKEN", async () => {
+    const args = parseArgs(["--provider", "alapi", "--prompt", "cat"]);
+    expect(args.provider).toBe("alapi");
+    await expect(
+      runGeneration(args, { env: {}, fetch: fetch as typeof globalThis.fetch })
+    ).rejects.toThrow("ALAPI_TOKEN");
+  });
+
   test("builds default and multi-image output paths", () => {
     const now = new Date("2026-04-28T09:10:11Z");
     expect(buildOutputPaths(null, 1, now)).toEqual(["tuzi-output/tuzi-20260428-091011.png"]);
@@ -76,6 +84,81 @@ describe("CLI parsing and output paths", () => {
   });
 });
 
+describe("ALAPI requests", () => {
+  test("sends text-to-image as JSON with query token and saves downloaded image", async () => {
+    const dir = await makeTempDir();
+    const png = await sharp({ create: { width: 16, height: 16, channels: 4, background: "white" } }).png().toBuffer();
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+
+    const fakeFetch: typeof globalThis.fetch = async (url, init) => {
+      requests.push({ url: String(url), init });
+      if (String(url).startsWith("https://v3.alapi.cn/api/ai/images/generations?")) {
+        return Response.json({ data: { data: [{ url: "https://example.test/alapi.png" }] } });
+      }
+      return new Response(png, { status: 200, headers: { "content-type": "image/png" } });
+    };
+
+    const result = await runGeneration(
+      parseArgs(["--provider", "alapi", "--prompt", "1:1 moon cat", "--output", join(dir, "alapi.png")]),
+      { env: { ALAPI_TOKEN: "alapi-token" }, fetch: fakeFetch }
+    );
+
+    const requestUrl = new URL(requests[0]!.url);
+    expect(result.provider).toBe("alapi");
+    expect(result.mode).toBe("generation");
+    expect(requestUrl.origin + requestUrl.pathname).toBe("https://v3.alapi.cn/api/ai/images/generations");
+    expect(requestUrl.searchParams.get("token")).toBe("alapi-token");
+    expect((requests[0]!.init!.headers as Record<string, string>).Authorization).toBeUndefined();
+    expect(JSON.parse(String(requests[0]!.init!.body))).toMatchObject({
+      model: "gpt-image-2",
+      prompt: "1:1 moon cat",
+      n: "1",
+      size: "1024x1024",
+      resolution: "1k",
+    });
+    expect((await stat(join(dir, "alapi.png"))).size).toBeGreaterThan(0);
+  });
+
+  test("sends local reference images to ALAPI as image_urls", async () => {
+    const dir = await makeTempDir();
+    const ref = join(dir, "ref.png");
+    const png = await sharp({ create: { width: 16, height: 16, channels: 4, background: "white" } }).png().toBuffer();
+    await sharp({ create: { width: 1200, height: 800, channels: 3, background: "red" } }).png().toFile(ref);
+    let body: Record<string, unknown> = {};
+
+    const fakeFetch: typeof globalThis.fetch = async (url, init) => {
+      if (String(url).startsWith("https://v3.alapi.cn/api/ai/images/generations?")) {
+        body = JSON.parse(String(init?.body));
+        return Response.json({ data: { data: [{ url: "https://example.test/alapi-edit.png" }] } });
+      }
+      return new Response(png, { status: 200, headers: { "content-type": "image/png" } });
+    };
+
+    const result = await runGeneration(
+      parseArgs(["--provider", "alapi", "--prompt", "保持原图比例，改成水彩", "--ref", ref, "--output", join(dir, "edit.png")]),
+      { env: { ALAPI_TOKEN: "alapi-token" }, fetch: fakeFetch }
+    );
+
+    expect(result.provider).toBe("alapi");
+    expect(result.mode).toBe("edit");
+    expect(result.size).toBe("1536x1024");
+    expect(Array.isArray(body.image_urls)).toBe(true);
+    expect((body.image_urls as string[])[0]).toMatch(/^data:image\/png;base64,/);
+  });
+
+  test("reports ALAPI business errors", async () => {
+    const fakeFetch: typeof globalThis.fetch = async () =>
+      Response.json({ success: false, code: 10005, message: "接口剩余可用次数不足，请充值" });
+
+    await expect(
+      runGeneration(parseArgs(["--provider", "alapi", "--prompt", "cat"]), {
+        env: { ALAPI_TOKEN: "alapi-token" },
+        fetch: fakeFetch,
+      })
+    ).rejects.toThrow("10005");
+  });
+});
+
 describe("background jobs", () => {
   test("starts a detached job with absolute outputs and no stored API key", async () => {
     const dir = await makeTempDir();
@@ -101,6 +184,23 @@ describe("background jobs", () => {
     const rawStatus = await readFile(status.statusPath, "utf8");
     expect(rawStatus).not.toContain("secret-token");
     expect(await readJobStatus(status.id, jobsDir)).toMatchObject({ id: status.id, status: "queued" });
+  });
+
+  test("starts an ALAPI background job without storing the token", async () => {
+    const dir = await makeTempDir();
+    const jobsDir = join(dir, "jobs");
+
+    const status = await startBackgroundJob(parseArgs(["--provider", "alapi", "--prompt", "cat", "--output", "out.png"]), {
+      env: { ALAPI_TOKEN: "alapi-secret-token" },
+      cwd: dir,
+      jobsDir,
+      now: new Date("2026-04-28T09:10:11Z"),
+      spawnDetached: async () => 4321,
+    });
+
+    expect(status.args?.provider).toBe("alapi");
+    const rawStatus = await readFile(status.statusPath, "utf8");
+    expect(rawStatus).not.toContain("alapi-secret-token");
   });
 });
 

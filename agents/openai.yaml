@@ -1,6 +1,6 @@
 interface:
   display_name: "Multi Image API"
-  short_description: "Generate and edit images with APIs"
-  default_prompt: "Use $multi-image-api to generate an image from my prompt, or edit a reference image."
+  short_description: "Generate and edit images with Tuzi or ALAPI"
+  default_prompt: "Use $multi-image-api with Tuzi or ALAPI to generate an image from my prompt, or edit a reference image."
 policy:
   allow_implicit_invocation: true
