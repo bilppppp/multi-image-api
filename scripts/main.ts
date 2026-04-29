@@ -43,6 +43,7 @@ export type RunResult = {
   model: string;
   size: string;
   outputs: string[];
+  warnings?: string[];
 };
 
 type RunDeps = {
@@ -105,6 +106,20 @@ export type PreparedEditAssets = {
   mask: ImageAsset | null;
   references: ImageAsset[];
   contentRect: ContentRect;
+};
+
+type TargetSizeInput = {
+  mode: Mode;
+  explicitSize?: string | null;
+  aspectRatio?: string | null;
+  prompt?: string | null;
+  inputWidth?: number;
+  inputHeight?: number;
+};
+
+export type TargetSizeDecision = {
+  size: string;
+  warnings: string[];
 };
 
 function printUsage(): void {
@@ -300,24 +315,22 @@ function formatTimestamp(now: Date): string {
   return `${now.getUTCFullYear()}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}-${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}${pad(now.getUTCSeconds())}`;
 }
 
-export function deriveTargetSize(input: {
-  mode: Mode;
-  explicitSize?: string | null;
-  aspectRatio?: string | null;
-  prompt?: string | null;
-  inputWidth?: number;
-  inputHeight?: number;
-}): string {
+export function deriveTargetSize(input: TargetSizeInput): string {
+  return deriveTargetSizeDecision(input).size;
+}
+
+export function deriveTargetSizeDecision(input: TargetSizeInput): TargetSizeDecision {
+  const warnings = deriveSizeWarnings(input);
   const explicit = normalizeExplicitSize(input.explicitSize) || normalizeExplicitSize(input.prompt);
-  if (explicit) return explicit;
+  if (explicit) return { size: explicit, warnings };
 
   const ratioSource = input.aspectRatio || extractRatioText(input.prompt);
-  if (ratioSource) return sizeForRatioText(ratioSource);
+  if (ratioSource) return { size: sizeForRatioText(ratioSource), warnings };
 
   const direction = extractDirection(input.prompt);
-  if (direction === "landscape") return "1536x864";
-  if (direction === "portrait") return "864x1536";
-  if (direction === "square") return "1024x1024";
+  if (direction === "landscape") return { size: "1536x864", warnings };
+  if (direction === "portrait") return { size: "864x1536", warnings };
+  if (direction === "square") return { size: "1024x1024", warnings };
 
   if (
     input.mode === "edit" &&
@@ -325,10 +338,10 @@ export function deriveTargetSize(input: {
     input.inputHeight &&
     (mentionsSourceRatio(input.prompt) || !input.prompt || input.prompt.trim().length > 0)
   ) {
-    return sizeForRatio(input.inputWidth / input.inputHeight);
+    return { size: sizeForRatio(input.inputWidth / input.inputHeight), warnings };
   }
 
-  return "1024x1024";
+  return { size: "1024x1024", warnings };
 }
 
 function normalizeExplicitSize(value?: string | null): string | null {
@@ -356,6 +369,69 @@ function extractDirection(prompt?: string | null): "landscape" | "portrait" | "s
   if (/竖版|竖幅|竖图|portrait/.test(lower)) return "portrait";
   if (/方图|方形|square/.test(lower)) return "square";
   return null;
+}
+
+function deriveSizeWarnings(input: TargetSizeInput): string[] {
+  const warnings: string[] = [];
+  const promptRatio = extractRatioText(input.prompt);
+  const ratioSource = input.aspectRatio || promptRatio;
+  const explicit = normalizeExplicitSize(input.explicitSize) || normalizeExplicitSize(input.prompt);
+  const directionInfo = extractDirectionInfo(input.prompt);
+
+  if (input.aspectRatio && promptRatio && normalizeRatioText(input.aspectRatio) !== normalizeRatioText(promptRatio)) {
+    warnings.push(`Both --ar ${input.aspectRatio} and prompt ratio ${promptRatio} were provided; using --ar.`);
+  }
+
+  if (explicit && (ratioSource || directionInfo.landscape || directionInfo.portrait || directionInfo.square)) {
+    warnings.push(`Explicit size ${explicit} overrides ratio or direction words in the prompt.`);
+    return warnings;
+  }
+
+  if (ratioSource) {
+    const orientation = orientationForRatioText(ratioSource);
+    if (orientation === "landscape" && directionInfo.portrait && !directionInfo.landscape) {
+      warnings.push(`Ratio ${ratioSource} is landscape but the prompt says portrait/vertical; using the explicit ratio.`);
+    }
+    if (orientation === "portrait" && directionInfo.landscape && !directionInfo.portrait) {
+      warnings.push(`Ratio ${ratioSource} is portrait but the prompt says landscape/horizontal; using the explicit ratio.`);
+    }
+  } else if (directionInfo.landscape && directionInfo.portrait) {
+    warnings.push("Prompt contains both landscape/horizontal and portrait/vertical words; using landscape direction.");
+  }
+
+  return warnings;
+}
+
+function extractDirectionInfo(prompt?: string | null): {
+  landscape: boolean;
+  portrait: boolean;
+  square: boolean;
+} {
+  const lower = (prompt || "").toLowerCase();
+  return {
+    landscape: /横版|横幅|横图|landscape/.test(lower),
+    portrait: /竖版|竖幅|竖图|portrait/.test(lower),
+    square: /方图|方形|square/.test(lower),
+  };
+}
+
+function normalizeRatioText(value: string): string {
+  const [left, right] = value.split(":");
+  const width = Number.parseFloat(left || "");
+  const height = Number.parseFloat(right || "");
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    return value.trim();
+  }
+  return `${trimRatioNumber(width)}:${trimRatioNumber(height)}`;
+}
+
+function orientationForRatioText(value: string): "landscape" | "portrait" | "square" | null {
+  const [left, right] = value.split(":");
+  const width = Number.parseFloat(left || "");
+  const height = Number.parseFloat(right || "");
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null;
+  if (Math.abs(width - height) < 0.01) return "square";
+  return width > height ? "landscape" : "portrait";
 }
 
 function mentionsSourceRatio(prompt?: string | null): boolean {
@@ -632,7 +708,7 @@ export async function runGeneration(args: CliArgs, deps: RunDeps = {}): Promise<
     }
   }
 
-  const size = deriveTargetSize({
+  const sizeDecision = deriveTargetSizeDecision({
     mode,
     explicitSize: args.size,
     aspectRatio: args.aspectRatio,
@@ -640,6 +716,7 @@ export async function runGeneration(args: CliArgs, deps: RunDeps = {}): Promise<
     inputWidth,
     inputHeight,
   });
+  const size = sizeDecision.size;
 
   const images =
     args.provider === "alapi"
@@ -651,7 +728,14 @@ export async function runGeneration(args: CliArgs, deps: RunDeps = {}): Promise<
   const runCwd = deps.cwd || resolveRunCwd({ oldpwd: env.OLDPWD });
   const outputs = makeAbsoluteOutputs(buildOutputPaths(args.output, images.length, deps.now), runCwd);
   await saveImages(images, outputs);
-  return { provider: args.provider, mode, model, size, outputs };
+  return {
+    provider: args.provider,
+    mode,
+    model,
+    size,
+    outputs,
+    ...(sizeDecision.warnings.length > 0 ? { warnings: sizeDecision.warnings } : {}),
+  };
 }
 
 function getProviderApiKey(provider: Provider, env: Record<string, string | undefined>): string {
@@ -1145,6 +1229,10 @@ if (import.meta.main) {
     } else {
       console.log(`Saved ${result.outputs.length} image${result.outputs.length === 1 ? "" : "s"}:`);
       for (const output of result.outputs) console.log(output);
+      if (result.warnings?.length) {
+        console.log("Warnings:");
+        for (const warning of result.warnings) console.log(`- ${warning}`);
+      }
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

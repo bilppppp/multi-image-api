@@ -8,6 +8,7 @@ import {
   readJobStatus,
   resolveRunCwd,
   deriveTargetSize,
+  deriveTargetSizeDecision,
   extractImagesFromResponse,
   parseArgs,
   prepareEditAssets,
@@ -222,6 +223,28 @@ describe("size derivation", () => {
     expect(deriveTargetSize({ mode: "generation", prompt: "4:3 复古插画" })).toBe("1536x1152");
     expect(deriveTargetSize({ mode: "generation", prompt: "3:2 摄影作品" })).toBe("1536x1024");
     expect(deriveTargetSize({ mode: "generation", prompt: "2:1 横幅" })).toBe("2048x1024");
+  });
+
+  test("warns when explicit ratios conflict with direction words", () => {
+    expect(deriveTargetSizeDecision({ mode: "generation", prompt: "16:9 竖幅海报" })).toMatchObject({
+      size: "1536x864",
+      warnings: [expect.stringContaining("landscape")],
+    });
+    expect(deriveTargetSizeDecision({ mode: "generation", prompt: "9:16 横幅海报" })).toMatchObject({
+      size: "864x1536",
+      warnings: [expect.stringContaining("portrait")],
+    });
+    expect(deriveTargetSizeDecision({ mode: "generation", prompt: "竖版海报", aspectRatio: "16:9" })).toMatchObject({
+      size: "1536x864",
+      warnings: [expect.stringContaining("landscape")],
+    });
+  });
+
+  test("warns when explicit size overrides ratio and direction words", () => {
+    expect(deriveTargetSizeDecision({ mode: "generation", prompt: "2048x1024 9:16 竖幅" })).toMatchObject({
+      size: "2048x1024",
+      warnings: [expect.stringContaining("Explicit size")],
+    });
   });
 
   test("keeps source ratio by default for image edits", () => {

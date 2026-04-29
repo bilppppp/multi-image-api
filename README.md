@@ -30,6 +30,7 @@ export ALAPI_TOKEN="你的 ALAPI token"
 ```
 
 不要把 API key 写进提示词，也不要直接粘贴给 AI agent。
+如果由 AI agent 帮你操作，不要让它在可见命令里直接写入完整 key。
 
 ## 安装
 
@@ -37,8 +38,8 @@ export ALAPI_TOKEN="你的 ALAPI token"
 
 ```bash
 git clone https://github.com/bilppppp/multi-image-api.git
-cd multi-image-api/scripts
-bun install --frozen-lockfile
+cd multi-image-api
+(cd scripts && bun install --frozen-lockfile)
 ```
 
 ## 使用示例
@@ -84,6 +85,8 @@ bun scripts/main.ts jobs wait --id JOB_ID --timeout 90
 | `--background` | 后台生成，推荐给 AI agent 使用 |
 | `--json` | 输出机器可读结果 |
 
+尺寸优先级是：明确尺寸 > 明确比例 > 横幅/竖幅这类方向词。比如 `16:9 竖幅` 会按 `16:9` 生成横图，并在结果里给出提醒。
+
 ## 给 AI Agent 看的如何安装
 
 当用户要求安装这个 skill 时，按下面流程执行。
@@ -112,6 +115,8 @@ git clone https://github.com/bilppppp/multi-image-api.git ~/.config/opencode/ski
 cd <skill目录>/scripts
 bun install --frozen-lockfile
 ```
+
+后续示例如果使用 `bun <skill目录>/scripts/main.ts`，不要求停留在 `scripts` 目录。
 
 3. 确认 key。
 

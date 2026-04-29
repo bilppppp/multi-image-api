@@ -1,6 +1,6 @@
 ---
 name: multi-image-api
-description: Use when generating or editing images through supported third-party image APIs, including Tuzi and ALAPI, with text-to-image prompts, image-to-image edits, reference images, provider selection, and aspect ratios.
+description: Use when users want to generate images, edit images, use reference images, choose Tuzi or ALAPI, set aspect ratios such as 9:16 or 16:9, or save third-party API image results locally.
 ---
 
 # Multi Image API
@@ -139,6 +139,14 @@ Common mappings:
 Direction words are used only when no explicit size or ratio exists: landscape -> `1536x864`, portrait -> `864x1536`, square -> `1024x1024`.
 
 For image edits with no requested size or ratio, keep the first image's aspect ratio.
+
+If the user mixes conflicting size hints, keep this precedence and continue:
+
+- Explicit size beats ratio and direction words.
+- Explicit ratio beats direction words.
+- Direction words are only a fallback.
+
+Examples: `16:9 竖幅` still uses `1536x864`; `9:16 横幅` still uses `864x1536`. The script returns a warning so the agent can mention that it followed the explicit ratio.
 
 ## References
 
